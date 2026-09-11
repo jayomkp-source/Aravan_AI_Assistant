@@ -1,0 +1,10 @@
+{
+  "name": "ARAVAN",
+  "description": "Dual-mode masculine AI assistant powered by Gemini Live API, persistent long-term memory brain, real-time Web Audio, and simultaneous live text synchronization.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
