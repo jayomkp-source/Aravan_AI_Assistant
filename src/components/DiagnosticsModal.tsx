@@ -1,5 +1,5 @@
 /**
- * DiagnosticsModal - Voice Pipeline & Live API Telemetry Inspector
+ * DiagnosticsModal - Voice, Time Command & 3D Glow Pipeline Telemetry Inspector
  */
 
 import React from 'react';
@@ -11,8 +11,25 @@ import {
   AUDIO_OUTPUT_FORMAT,
   LIVE_MODEL_NAME,
 } from '../config/voice';
-import { SessionStats, VoiceState } from '../types';
-import { ShieldCheck, Cpu, Mic, Volume2, Radio, CheckCircle2, X } from 'lucide-react';
+import {
+  SessionStats,
+  VoiceState,
+  TimeDiagnostics,
+  GlowDiagnostics,
+} from '../types';
+import {
+  ShieldCheck,
+  Cpu,
+  Mic,
+  Volume2,
+  Radio,
+  CheckCircle2,
+  X,
+  Eye,
+  Clock,
+  Sparkles,
+} from 'lucide-react';
+import { ScreenVisionManager } from '../services/ScreenVisionManager';
 
 interface DiagnosticsModalProps {
   isOpen: boolean;
@@ -23,7 +40,12 @@ interface DiagnosticsModalProps {
   activeAssistantMessageId?: string | null;
   audioContextState?: string;
   isMicActive?: boolean;
+  isPlaying?: boolean;
   audioQueueSize?: number;
+  lastAudioError?: string | null;
+  timeDiagnostics?: TimeDiagnostics;
+  glowDiagnostics?: GlowDiagnostics;
+  onTestConnection?: () => void;
 }
 
 export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
@@ -33,12 +55,20 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
   stats,
   lastLiveEvent,
   activeAssistantMessageId,
-  audioContextState = 'running',
+  audioContextState = 'uninitialized',
   isMicActive = false,
+  isPlaying = false,
   audioQueueSize = 0,
+  lastAudioError = null,
+  timeDiagnostics,
+  glowDiagnostics,
 }) => {
   const [testingConnection, setTestingConnection] = React.useState(false);
-  const [testResult, setTestResult] = React.useState<{ success: boolean; message: string; latency?: number } | null>(null);
+  const [testResult, setTestResult] = React.useState<{
+    success: boolean;
+    message: string;
+    latency?: number;
+  } | null>(null);
 
   if (!isOpen) return null;
 
@@ -72,46 +102,46 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
 
   const checks = [
     {
-      title: "Centralized Voice Constant",
+      title: 'Centralized Voice Constant',
       status: `ARAVAN_VOICE = "${ARAVAN_VOICE}" (Male)`,
       passed: true,
-      note: "Explicit prebuilt voice configured via speechConfig",
+      note: 'Explicit prebuilt voice configured via speechConfig',
     },
     {
-      title: "Voice Generation Pipeline",
+      title: 'Voice Generation Pipeline',
       status: VOICE_PIPELINE,
       passed: true,
-      note: "Zero secondary TTS engines",
+      note: 'Zero secondary or browser SpeechSynthesis engines',
     },
     {
-      title: "Voice Fallback Policy",
+      title: 'Voice Fallback Policy',
       status: `${VOICE_FALLBACK_STATUS} (Strict)`,
       passed: true,
-      note: "Never substitutes female or browser TTS voices",
+      note: 'Never substitutes female or OS TTS voices',
     },
     {
-      title: "Audio Input Stream",
+      title: 'Audio Input Stream',
       status: AUDIO_INPUT_FORMAT,
       passed: true,
-      note: "Web Audio low-latency mono stream",
+      note: 'Web Audio low-latency mono stream',
     },
     {
-      title: "Audio Output Stream",
+      title: 'Audio Output Stream',
       status: AUDIO_OUTPUT_FORMAT,
       passed: true,
-      note: "24kHz direct Web Audio API gapless queue",
+      note: '24kHz direct Web Audio API ordered gapless queue',
     },
     {
-      title: "Live Gemini Model",
+      title: 'Live Gemini Model',
       status: LIVE_MODEL_NAME,
       passed: true,
-      note: "Audio-to-audio native bidirectional model",
+      note: 'Audio-to-audio native bidirectional model (v1beta)',
     },
     {
-      title: "Barge-In / Interruption Engine",
-      status: "ACTIVE",
+      title: 'Barge-In / Interruption Engine',
+      status: 'ACTIVE',
       passed: true,
-      note: "Instant buffer purge on user speech",
+      note: 'Instant buffer purge & generation guard on user speech',
     },
   ];
 
@@ -126,7 +156,7 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
           <div className="flex items-center gap-2.5">
             <ShieldCheck className="w-5 h-5 text-amber-400" />
             <h3 className="font-semibold text-zinc-100 text-lg tracking-wide">
-              ARAVAN Voice & Pipeline Diagnostics
+              ARAVAN Voice, Time & Glow Diagnostics
             </h3>
           </div>
           <button
@@ -141,11 +171,11 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
 
         {/* Content */}
         <div className="p-6 overflow-y-auto space-y-6 text-sm">
-          {/* Live Telemetry Card */}
+          {/* Voice & Audio Pipeline Telemetry Card */}
           <div className="p-4 bg-zinc-900/60 border border-zinc-800 rounded-xl space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                Live API & Audio Pipeline Telemetry
+                Voice & Audio Pipeline Telemetry
               </span>
               <button
                 onClick={runConnectionTest}
@@ -157,7 +187,13 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
             </div>
 
             {testResult && (
-              <div className={`p-2.5 rounded-lg text-xs font-mono ${testResult.success ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800/60' : 'bg-red-950/60 text-red-300 border border-red-800/60'}`}>
+              <div
+                className={`p-2.5 rounded-lg text-xs font-mono ${
+                  testResult.success
+                    ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800/60'
+                    : 'bg-red-950/60 text-red-300 border border-red-800/60'
+                }`}
+              >
                 {testResult.message}
               </div>
             )}
@@ -174,18 +210,26 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
                 </div>
               </div>
               <div className="p-2 bg-zinc-950/80 rounded border border-zinc-800/60">
-                <div className="text-zinc-500 text-[10px]">Audio Queue</div>
-                <div className="text-zinc-200">{audioQueueSize} buffers</div>
+                <div className="text-zinc-500 text-[10px]">Playback & Queue</div>
+                <div className="text-zinc-200">
+                  {isPlaying ? 'Playing' : 'Idle'} ({audioQueueSize} chunks)
+                </div>
               </div>
               <div className="p-2 bg-zinc-950/80 rounded border border-zinc-800/60">
                 <div className="text-zinc-500 text-[10px]">Last Live Event</div>
-                <div className="text-amber-400">{lastLiveEvent || 'none'}</div>
+                <div className="text-amber-400 truncate">{lastLiveEvent || 'none'}</div>
               </div>
               <div className="p-2 bg-zinc-950/80 rounded border border-zinc-800/60 col-span-2">
                 <div className="text-zinc-500 text-[10px]">Active Assistant Msg ID</div>
                 <div className="text-zinc-400 truncate">{activeAssistantMessageId || 'none'}</div>
               </div>
             </div>
+
+            {lastAudioError && (
+              <div className="p-2 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300 text-[11px] font-mono">
+                <strong>Last Audio/Voice Error:</strong> {lastAudioError}
+              </div>
+            )}
           </div>
 
           {/* Live Status Card */}
@@ -205,9 +249,7 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
                 <Cpu className="w-3.5 h-3.5 text-amber-400" />
                 Male Voice
               </div>
-              <span className="font-medium text-amber-400 font-mono text-xs">
-                {ARAVAN_VOICE}
-              </span>
+              <span className="font-medium text-amber-400 font-mono text-xs">{ARAVAN_VOICE}</span>
             </div>
 
             <div className="p-3 bg-zinc-900/70 border border-zinc-800/80 rounded-xl">
@@ -215,20 +257,190 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
                 <Mic className="w-3.5 h-3.5 text-amber-400" />
                 Packets Sent
               </div>
-              <span className="font-medium text-zinc-100 font-mono text-xs">
-                {stats.packetsSent}
-              </span>
+              <span className="font-medium text-zinc-100 font-mono text-xs">{stats.packetsSent}</span>
             </div>
 
             <div className="p-3 bg-zinc-900/70 border border-zinc-800/80 rounded-xl">
               <div className="flex items-center gap-1.5 text-zinc-400 text-xs mb-1">
                 <Volume2 className="w-3.5 h-3.5 text-amber-400" />
-                Packets Recv
+                Chunks Recv
               </div>
               <span className="font-medium text-zinc-100 font-mono text-xs">
                 {stats.packetsReceived}
               </span>
             </div>
+          </div>
+
+          {/* Time Command Diagnostics */}
+          <div className="p-3.5 rounded-xl bg-emerald-950/20 border border-emerald-500/30 space-y-2">
+            <div className="flex items-center justify-between pb-1.5 border-b border-emerald-900/40">
+              <div className="flex items-center gap-2 text-emerald-300 font-bold text-xs">
+                <Clock className="w-4 h-4" />
+                <span>Time Command Diagnostics</span>
+              </div>
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-500/40">
+                {timeDiagnostics?.activeTimeZone || 'Asia/Kolkata'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono">
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Last Query / Intent</div>
+                <div className="text-zinc-200 truncate">
+                  {timeDiagnostics?.lastQuery || timeDiagnostics?.recognizedIntent || 'None yet'}
+                </div>
+              </div>
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Tool Invoked</div>
+                <div className="text-cyan-300">{timeDiagnostics?.toolInvoked || 'None yet'}</div>
+              </div>
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60 sm:col-span-2">
+                <div className="text-zinc-500 text-[10px]">Execution Result</div>
+                <div className="text-emerald-300 break-words">
+                  {timeDiagnostics?.executionResult || 'Waiting for time command'}
+                </div>
+              </div>
+            </div>
+
+            {timeDiagnostics?.lastTimeError && (
+              <div className="p-2 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300 text-[11px] font-mono">
+                <strong>Last Time Error:</strong> {timeDiagnostics.lastTimeError}
+              </div>
+            )}
+          </div>
+
+          {/* 3D Glow & Renderer Diagnostics */}
+          <div className="p-3.5 rounded-xl bg-violet-950/20 border border-violet-500/30 space-y-2">
+            <div className="flex items-center justify-between pb-1.5 border-b border-violet-900/40">
+              <div className="flex items-center gap-2 text-violet-300 font-bold text-xs">
+                <Sparkles className="w-4 h-4" />
+                <span>3D Glow & Renderer Telemetry</span>
+              </div>
+              <span
+                className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-bold ${
+                  glowDiagnostics?.rendererStatus === 'active'
+                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
+                    : glowDiagnostics?.rendererStatus === 'error'
+                    ? 'bg-rose-950 text-rose-300 border border-rose-500/40'
+                    : 'bg-zinc-800 text-zinc-300'
+                }`}
+              >
+                {glowDiagnostics?.rendererStatus || 'initializing'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 text-xs font-mono">
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Preset</div>
+                <div className="text-violet-300 uppercase">
+                  {glowDiagnostics?.activePreset || 'default'}
+                </div>
+              </div>
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Master</div>
+                <div className="text-zinc-200">{glowDiagnostics?.masterGlow ?? 75}%</div>
+              </div>
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Eyes</div>
+                <div className="text-zinc-200">{glowDiagnostics?.eyeGlow ?? 80}%</div>
+              </div>
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Bloom</div>
+                <div className="text-zinc-200">{glowDiagnostics?.bloom ?? 70}%</div>
+              </div>
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Fog</div>
+                <div className="text-zinc-200">{glowDiagnostics?.fog ?? 40}%</div>
+              </div>
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Particles</div>
+                <div className="text-zinc-200">{glowDiagnostics?.particles ?? 60}%</div>
+              </div>
+            </div>
+
+            {glowDiagnostics?.lastSyncError && (
+              <div className="p-2 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300 text-[11px] font-mono">
+                <strong>Renderer Error:</strong> {glowDiagnostics.lastSyncError}
+              </div>
+            )}
+          </div>
+
+          {/* Screen Vision Telemetry */}
+          <div className="p-3.5 rounded-xl bg-cyan-950/30 border border-cyan-500/40 space-y-2">
+            <div className="flex items-center justify-between pb-1.5 border-b border-cyan-900/40">
+              <div className="flex items-center gap-2 text-cyan-300 font-bold text-xs">
+                <Eye className="w-4 h-4" />
+                <span>Screen Vision Telemetry</span>
+              </div>
+              <span
+                className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                  ScreenVisionManager.getInstance().getState() === 'SCREEN_ACTIVE'
+                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
+                    : 'bg-zinc-800 text-zinc-400'
+                }`}
+              >
+                {ScreenVisionManager.getInstance().getState()}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Browser Support</div>
+                <div
+                  className={
+                    typeof navigator !== 'undefined' && navigator?.mediaDevices?.getDisplayMedia
+                      ? 'text-emerald-400'
+                      : 'text-rose-400'
+                  }
+                >
+                  {typeof navigator !== 'undefined' && navigator?.mediaDevices?.getDisplayMedia
+                    ? 'YES (Native)'
+                    : 'NO'}
+                </div>
+              </div>
+
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Secure Context</div>
+                <div
+                  className={
+                    typeof window !== 'undefined' && window.isSecureContext
+                      ? 'text-emerald-400'
+                      : 'text-rose-400'
+                  }
+                >
+                  {typeof window !== 'undefined' && window.isSecureContext
+                    ? 'YES (Secure)'
+                    : 'NO (Insecure)'}
+                </div>
+              </div>
+
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Stream Status</div>
+                <div
+                  className={
+                    ScreenVisionManager.getInstance().getStream()
+                      ? 'text-emerald-400'
+                      : 'text-zinc-400'
+                  }
+                >
+                  {ScreenVisionManager.getInstance().getStream() ? 'ACTIVE' : 'NONE'}
+                </div>
+              </div>
+
+              <div className="p-2 bg-zinc-950/70 rounded border border-zinc-800/60">
+                <div className="text-zinc-500 text-[10px]">Video Track</div>
+                <div className="text-zinc-300">
+                  {ScreenVisionManager.getInstance().getStream()?.getVideoTracks()?.[0]?.readyState ||
+                    'NONE'}
+                </div>
+              </div>
+            </div>
+
+            {ScreenVisionManager.getInstance().getLastError() && (
+              <div className="p-2 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300 text-[11px] font-mono">
+                <strong>Last Error:</strong> {ScreenVisionManager.getInstance().getLastError()}
+              </div>
+            )}
           </div>
 
           {/* Voice Integrity Verification List */}
@@ -262,7 +474,9 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
 
         {/* Footer */}
         <div className="px-6 py-3.5 bg-zinc-900/60 border-t border-zinc-800 flex items-center justify-between text-xs text-zinc-400">
-          <span>Interruption Events: <strong className="text-zinc-200">{stats.interruptionsCount}</strong></span>
+          <span>
+            Interruption Events: <strong className="text-zinc-200">{stats.interruptionsCount}</strong>
+          </span>
           <span className="text-zinc-500 font-mono">ARAVAN Live v1.0</span>
         </div>
       </div>

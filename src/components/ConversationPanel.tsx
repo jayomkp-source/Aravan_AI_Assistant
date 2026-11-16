@@ -1,28 +1,33 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ConversationMessage } from '../types';
-import { MessageSquare, Bot, Sparkles, Trash2, Brain } from 'lucide-react';
+import { Trash2, Send, Mic, MicOff, MessageSquare, Brain } from 'lucide-react';
 import { MessageBubble } from './MessageBubble';
+import { CapabilityCard } from './CapabilityCard';
 
 interface ConversationPanelProps {
   messages: ConversationMessage[];
   voiceState: string;
   onClear: () => void;
-  onQuickPrompt?: (text: string) => void;
-  onOpenMemory?: () => void;
+  onSendMessage: (text: string) => void;
+  onToggleMic: () => void;
+  isMicActive: boolean;
 }
 
 export const ConversationPanel: React.FC<ConversationPanelProps> = ({
   messages,
   voiceState,
   onClear,
-  onQuickPrompt,
-  onOpenMemory,
+  onSendMessage,
+  onToggleMic,
+  isMicActive,
 }) => {
+  const [activeTab, setActiveTab] = useState<'chat' | 'capabilities'>('chat');
+  const [inputText, setInputText] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const isAutoScrollRef = useRef(true);
 
-  // Auto-scroll to latest message/token if user is near bottom
+  // Auto-scroll on new messages
   useEffect(() => {
     if (isAutoScrollRef.current && bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -32,102 +37,140 @@ export const ConversationPanel: React.FC<ConversationPanelProps> = ({
   const handleScroll = () => {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    // If within 100px of bottom, keep auto-scrolling
     isAutoScrollRef.current = scrollHeight - (scrollTop + clientHeight) < 100;
   };
 
-  return (
-    <div className="w-full flex flex-col h-full bg-zinc-900/40 backdrop-blur-xl border border-zinc-800/80 rounded-2xl overflow-hidden shadow-2xl transition-all duration-300">
-      {/* Panel Header */}
-      <div className="px-4 py-3 border-b border-zinc-800/60 bg-zinc-950/40 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <MessageSquare className="w-4 h-4 text-amber-400" />
-          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
-            Live Conversation
-          </span>
-          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800/80 text-zinc-400 border border-zinc-700/50">
-            {messages.length} {messages.length === 1 ? 'message' : 'messages'}
-          </span>
-        </div>
+  const handleSend = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = inputText.trim();
+    if (!trimmed) return;
+    onSendMessage(trimmed);
+    setInputText('');
+  };
 
-        <div className="flex items-center gap-2">
-          {onOpenMemory && (
+  return (
+    <aside className="w-full flex flex-col gap-4 select-none">
+      {/* 1. Main Conversation / Capability Glass Card */}
+      <div className="flex-1 flex flex-col bg-[#09071c]/75 backdrop-blur-2xl border border-zinc-800/80 rounded-2xl overflow-hidden shadow-2xl shadow-purple-950/20">
+        {/* Header with Switcher Tabs */}
+        <div className="px-3.5 py-2.5 border-b border-zinc-800/60 flex items-center justify-between bg-zinc-950/50">
+          <div className="flex items-center gap-1.5 p-1 rounded-xl bg-zinc-900/80 border border-zinc-800">
             <button
-              id="open-memory-btn"
-              onClick={onOpenMemory}
-              className="px-2.5 py-1 rounded-lg text-xs font-medium text-amber-400 bg-amber-950/40 border border-amber-500/30 hover:bg-amber-900/50 transition-all flex items-center gap-1.5 shadow-sm"
-              title="Open ARAVAN's Memory"
+              onClick={() => setActiveTab('chat')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono font-semibold transition-all ${
+                activeTab === 'chat'
+                  ? 'bg-zinc-800 text-white shadow-sm ring-1 ring-cyan-500/40'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <MessageSquare className="w-3.5 h-3.5 text-cyan-400" />
+              <span>CHAT {messages.length > 0 && `(${messages.length})`}</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('capabilities')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono font-semibold transition-all ${
+                activeTab === 'capabilities'
+                  ? 'bg-zinc-800 text-white shadow-sm ring-1 ring-amber-500/40'
+                  : 'text-zinc-400 hover:text-amber-300'
+              }`}
             >
               <Brain className="w-3.5 h-3.5 text-amber-400" />
-              <span>Memory</span>
+              <span>BRAIN & POWERS</span>
             </button>
-          )}
+          </div>
 
-          {messages.length > 0 && (
+          {activeTab === 'chat' && messages.length > 0 && (
             <button
-              id="clear-chat-btn"
               onClick={onClear}
-              className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60 transition-colors"
+              className="flex items-center gap-1 text-[11px] font-mono text-rose-400/90 hover:text-rose-300 transition-colors"
               title="Clear transcript"
             >
+              <span>Clear</span>
               <Trash2 className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
-      </div>
 
-      {/* Messages Scroll Area */}
-      <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        className="flex-1 overflow-y-auto p-4 space-y-3.5 select-text scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent"
-        style={{ minHeight: '180px', maxHeight: '340px' }}
-      >
-        {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center p-6 text-zinc-500">
-            <Bot className="w-8 h-8 text-zinc-600 mb-2 opacity-60" />
-            <p className="text-xs">No messages yet. Speak or type to begin talking with ARAVAN.</p>
-          </div>
+        {activeTab === 'chat' ? (
+          <>
+            {/* Message Stream */}
+            <div
+              ref={scrollRef}
+              onScroll={handleScroll}
+              className="flex-1 overflow-y-auto p-3.5 space-y-3 select-text scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent min-h-[280px] max-h-[460px]"
+            >
+              {messages.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center p-6 text-zinc-500 space-y-2">
+                  <p className="text-xs text-zinc-400 font-medium">Ready for conversation.</p>
+                  <p className="text-[11px] text-zinc-600 max-w-xs">
+                    Speak into your mic or type below. ARAVAN will respond with real voice and text simultaneously.
+                  </p>
+                </div>
+              ) : (
+                messages.map((msg) => <MessageBubble key={msg.id} message={msg} />)
+              )}
+              <div ref={bottomRef} />
+            </div>
+
+            {/* Quick Suggestion Pills */}
+            <div className="px-3 py-2 border-t border-zinc-850/60 bg-zinc-950/40 flex items-center gap-1.5 overflow-x-auto scrollbar-none">
+              {[
+                'Who built you?',
+                'What time is it?',
+                'Tell a cyber joke',
+                'What do you know about me?',
+                'Open YouTube',
+              ].map((pill, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => onSendMessage(pill)}
+                  className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-cyan-300 transition-colors whitespace-nowrap"
+                >
+                  +{pill}
+                </button>
+              ))}
+            </div>
+
+            {/* Input Bar (Reference Screenshot Match) */}
+            <form
+              onSubmit={handleSend}
+              className="p-2.5 border-t border-zinc-800/60 bg-zinc-950/60 flex items-center gap-2"
+            >
+              <div className="relative flex-1 flex items-center">
+                <input
+                  type="text"
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  placeholder="Type a message or command..."
+                  className="w-full bg-zinc-900/60 border border-zinc-800 focus:border-cyan-500/60 rounded-xl pl-3.5 pr-8 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-cyan-500/40 transition-all font-sans"
+                />
+                <button
+                  type="button"
+                  onClick={onToggleMic}
+                  className="absolute right-2 text-zinc-400 hover:text-cyan-300 transition-colors"
+                  title={isMicActive ? 'Mute microphone' : 'Unmute microphone'}
+                >
+                  {isMicActive ? <Mic className="w-3.5 h-3.5 text-cyan-400" /> : <MicOff className="w-3.5 h-3.5 text-zinc-500" />}
+                </button>
+              </div>
+
+              <button
+                type="submit"
+                disabled={!inputText.trim()}
+                className="w-8 h-8 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white flex items-center justify-center disabled:opacity-40 disabled:pointer-events-none transition-all shadow-md shadow-cyan-900/30 shrink-0"
+                title="Send message to ARAVAN"
+              >
+                <Send className="w-3.5 h-3.5 stroke-[2.5]" />
+              </button>
+            </form>
+          </>
         ) : (
-          messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
-          ))
+          <div className="p-2 max-h-[540px] overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800">
+            <CapabilityCard onSelectAction={onSendMessage} />
+          </div>
         )}
-        <div ref={bottomRef} />
       </div>
-
-      {/* Quick Prompts (if empty or starting) */}
-      {onQuickPrompt && messages.length <= 2 && (
-        <div className="px-4 py-2.5 border-t border-zinc-800/40 bg-zinc-950/20 flex items-center gap-2 overflow-x-auto text-[11px] font-mono no-scrollbar">
-          <span className="text-zinc-500 flex items-center gap-1 shrink-0">
-            <Sparkles className="w-3 h-3 text-amber-500/70" /> Try:
-          </span>
-          <button
-            onClick={() => onQuickPrompt('Who built you?')}
-            className="px-2.5 py-1 rounded-full bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/60 shrink-0 transition-colors"
-          >
-            "Who built you?"
-          </button>
-          <button
-            onClick={() => onQuickPrompt('Remember that I like dark themes.')}
-            className="px-2.5 py-1 rounded-full bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/60 shrink-0 transition-colors"
-          >
-            "Remember that..."
-          </button>
-          <button
-            onClick={() => onQuickPrompt('What do you remember about me?')}
-            className="px-2.5 py-1 rounded-full bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/60 shrink-0 transition-colors"
-          >
-            "What do you remember?"
-          </button>
-          <button
-            onClick={() => onQuickPrompt('Kese ho boss?')}
-            className="px-2.5 py-1 rounded-full bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/60 shrink-0 transition-colors"
-          >
-            "Kese ho boss?"
-          </button>
-        </div>
-      )}
-    </div>
+    </aside>
   );
 };

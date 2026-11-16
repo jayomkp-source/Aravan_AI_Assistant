@@ -1,45 +1,104 @@
 /**
  * LiveSession - Real-Time Gemini Live Audio-to-Audio Session Coordinator
- * 
+ *
  * STRICT COMPLIANCE:
- * - Direct connection with Gemini Live API using configured male voice (ARAVAN_VOICE).
- * - Zero fallback voices.
- * - Instant barge-in audio clearing.
+ * - Direct connection with Gemini Live API using configured male voice (ARAVAN_VOICE = "Charon").
+ * - Zero fallback browser TTS voices.
+ * - Instant barge-in audio clearing and synchronized text + audio state.
  */
 
-import { ARAVAN_VOICE, ARAVAN_VOICE_CONFIG, validateVoiceConfig, logVoiceSafetyCheck } from '../config/voice';
+import { ARAVAN_VOICE, validateVoiceConfig, logVoiceSafetyCheck } from '../config/voice';
 import { AudioStreamer } from '../audio/AudioStreamer';
 import { AudioPlayer } from '../audio/AudioPlayer';
+import { SpeechRecognitionListener } from '../audio/SpeechRecognitionListener';
 import { ToolManager } from '../tools/ToolManager';
 import { StateManager } from '../state/StateManager';
 import { LiveClientMessage, LiveServerMessage } from '../types';
 import { MemoryManager } from '../memory/MemoryManager';
+import { AudioReactiveCore } from '../audio/AudioReactiveCore';
+
+function looksLikeTimeQuery(text: string): boolean {
+  const p = text.toLowerCase();
+  return (
+    /\b(time|clock|date|day|today|month|year|timezone|baje|samay|waqt|tarikh)\b/i.test(p) ||
+    p.includes('kitne baje') ||
+    p.includes('kitna time')
+  );
+}
 
 export class LiveSession {
   private ws: WebSocket | null = null;
   private audioStreamer: AudioStreamer;
   private audioPlayer: AudioPlayer;
+  private speechListener: SpeechRecognitionListener;
   private toolManager: ToolManager;
   private stateManager: StateManager;
   private isConnecting = false;
   private isConnected = false;
+  private connectPromise: Promise<void> | null = null;
+  private connectedWaiters: Array<() => void> = [];
+  private connectionRejectWaiters: Array<(err: Error) => void> = [];
+  private lastSessionError: string | null = null;
 
   constructor(stateManager: StateManager) {
     this.stateManager = stateManager;
     this.audioStreamer = new AudioStreamer();
     this.audioPlayer = new AudioPlayer();
-    this.toolManager = new ToolManager();
+    this.speechListener = new SpeechRecognitionListener();
+    this.toolManager = new ToolManager(stateManager);
 
-    // Hook audio player state changes
+    // Hook audio player state changes:
+    // SPEAKING represents ACTUAL audio playback (never just arriving text).
     this.audioPlayer.setCallbacks(
       (isPlaying) => {
-        if (this.isConnected) {
-          this.stateManager.setVoiceState(isPlaying ? 'speaking' : 'listening');
+        AudioReactiveCore.getInstance().setSpeakingState(isPlaying);
+        this.speechListener.setSpeaking(isPlaying);
+        if (isPlaying) {
+          this.stateManager.setVoiceState('speaking');
+        } else if (this.isConnected) {
+          this.stateManager.setVoiceState('listening');
+        } else if (this.stateManager.getState().voiceState === 'speaking') {
+          this.stateManager.setVoiceState('disconnected');
         }
       },
       (volume) => {
         const currentMicVol = this.stateManager.getState().micVolume;
         this.stateManager.setVolumes(currentMicVol, volume);
+      },
+      (audioErr) => {
+        this.stateManager.setAudioError(audioErr);
+      }
+    );
+
+    // Register strict Gemini Charon TTS handler for Screen Vision narration / Test Speech
+    AudioReactiveCore.getInstance().registerCharonSpeechHandler(
+      async (text, onStart, onEnd) => {
+        try {
+          await this.audioPlayer.initialize();
+          const res = await fetch('/api/tts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.success || !data.audio) {
+            throw new Error(data?.error || 'Charon TTS endpoint unavailable.');
+          }
+          this.stateManager.setAudioError(null);
+          onStart?.();
+          await this.audioPlayer.playPCMChunk(data.audio);
+          await this.audioPlayer.waitForDrain();
+          onEnd?.();
+        } catch (err: any) {
+          const msg = err?.message || 'Charon TTS playback failed.';
+          console.warn('[ARAVAN] Charon TTS error:', msg);
+          this.stateManager.setAudioError(msg);
+          AudioReactiveCore.getInstance().setLastAudioError(msg);
+          onEnd?.();
+        }
+      },
+      () => {
+        this.audioPlayer.interrupt();
       }
     );
 
@@ -49,33 +108,165 @@ export class LiveSession {
       setTimeout(() => {
         this.stateManager.setActiveTool({ name, args, status: 'done' });
         setTimeout(() => this.stateManager.setActiveTool(null), 3000);
-      }, 1000);
+      }, 900);
     });
+  }
+
+  /**
+   * Unlocks / resumes Web Audio output on a user gesture without creating duplicate contexts.
+   */
+  async unlockAudio(): Promise<void> {
+    try {
+      await this.audioPlayer.initialize();
+    } catch {
+      // Ignore autoplay restriction errors prior to gesture
+    }
+  }
+
+  private resolveConnectedWaiters(): void {
+    this.connectionRejectWaiters = [];
+    while (this.connectedWaiters.length > 0) {
+      const resolve = this.connectedWaiters.shift();
+      resolve?.();
+    }
+  }
+
+  private rejectConnectedWaiters(err: Error): void {
+    this.connectedWaiters = [];
+    while (this.connectionRejectWaiters.length > 0) {
+      const reject = this.connectionRejectWaiters.shift();
+      reject?.(err);
+    }
+  }
+
+  private waitForConnected(timeoutMs = 8000): Promise<void> {
+    if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.connectedWaiters.indexOf(onReady);
+        if (idx !== -1) this.connectedWaiters.splice(idx, 1);
+        const rIdx = this.connectionRejectWaiters.indexOf(onReject);
+        if (rIdx !== -1) this.connectionRejectWaiters.splice(rIdx, 1);
+        reject(new Error('Timed out waiting for Gemini Live session confirmation.'));
+      }, timeoutMs);
+
+      const onReady = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const onReject = (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      };
+      this.connectedWaiters.push(onReady);
+      this.connectionRejectWaiters.push(onReject);
+    });
+  }
+
+  /**
+   * Start 16kHz microphone capture and attach to the active Live session
+   */
+  async startMicrophone(): Promise<void> {
+    if (this.audioStreamer.isStreamingActive) return;
+
+    try {
+      await this.audioPlayer.initialize();
+      await this.audioStreamer.start(
+        (pcm16Base64) => {
+          const isSpeaking =
+            this.audioPlayer.currentlyPlaying ||
+            AudioReactiveCore.getInstance().getIsSpeaking() ||
+            this.stateManager.getState().voiceState === 'speaking';
+          const stopWhileSpeaking = this.stateManager.getState().stopListeningWhileSpeaking;
+
+          // Echo-shield: skip sending mic audio while ARAVAN is speaking
+          if (stopWhileSpeaking && isSpeaking) {
+            return;
+          }
+
+          if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+            const msg: LiveClientMessage = {
+              type: 'audio',
+              audio: pcm16Base64,
+            };
+            this.ws.send(JSON.stringify(msg));
+            this.stateManager.incrementPacketsSent();
+          }
+        },
+        (micVolume) => {
+          const isSpeaking =
+            this.audioPlayer.currentlyPlaying ||
+            AudioReactiveCore.getInstance().getIsSpeaking() ||
+            this.stateManager.getState().voiceState === 'speaking';
+          const stopWhileSpeaking = this.stateManager.getState().stopListeningWhileSpeaking;
+
+          const effectiveMicVol = stopWhileSpeaking && isSpeaking ? 0 : micVolume;
+          const currentSpeakerVol = this.stateManager.getState().speakerVolume;
+          this.stateManager.setVolumes(effectiveMicVol, currentSpeakerVol);
+
+          // Barge-in if user intentionally kept mic active during speech
+          if (!stopWhileSpeaking && micVolume > 0.45 && this.audioPlayer.currentlyPlaying) {
+            this.audioPlayer.interrupt();
+            this.stateManager.incrementInterruptions();
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send(JSON.stringify({ type: 'interrupt' }));
+            }
+          }
+        }
+      );
+      this.stateManager.setMicMuted(this.audioStreamer.muted);
+    } catch (micErr: any) {
+      const errMsg = micErr?.message || 'Microphone access unavailable or denied.';
+      console.warn('[ARAVAN] Microphone initialization note:', errMsg);
+      this.stateManager.setAudioError(errMsg);
+    }
   }
 
   /**
    * Connect to Gemini Live Audio Session
    */
-  async connect(): Promise<void> {
-    if (this.isConnected || this.isConnecting) return;
+  async connect(options?: { enableMic?: boolean }): Promise<void> {
+    const enableMic = options?.enableMic ?? true;
 
+    if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (enableMic && !this.audioStreamer.isStreamingActive) {
+        await this.startMicrophone();
+      }
+      return;
+    }
+
+    if (this.connectPromise) {
+      await this.connectPromise;
+      if (enableMic && this.isConnected && !this.audioStreamer.isStreamingActive) {
+        await this.startMicrophone();
+      }
+      return;
+    }
+
+    this.connectPromise = this.performConnect(enableMic);
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
+  }
+
+  private async performConnect(enableMic: boolean): Promise<void> {
     this.isConnecting = true;
+    this.lastSessionError = null;
     this.stateManager.setVoiceState('connecting');
 
     try {
-      // 1. CRITICAL VOICE SAFETY CHECK
       validateVoiceConfig();
       if (!ARAVAN_VOICE) {
-        throw new Error("ARAVAN voice configuration missing.");
+        throw new Error('ARAVAN voice configuration missing.');
       }
-
-      // Log voice configuration details in development mode
       logVoiceSafetyCheck();
 
-      // 2. Initialize Audio Player context (user interaction required for AudioContext)
       await this.audioPlayer.initialize();
 
-      // 3. Establish WebSocket connection to backend Live API proxy with resilient multi-endpoint fallback
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const endpoints = [
         `${protocol}//${window.location.host}/api/live`,
@@ -108,7 +299,7 @@ export class LiveSession {
                 }
               };
 
-              ws.onerror = (evt) => {
+              ws.onerror = () => {
                 if (!settled) {
                   settled = true;
                   clearTimeout(timer);
@@ -120,52 +311,20 @@ export class LiveSession {
             if (connectedWs) break;
           } catch (err: any) {
             lastWsError = err;
-            await new Promise((r) => setTimeout(r, 400));
+            await new Promise((r) => setTimeout(r, 350));
           }
         }
         if (connectedWs) break;
       }
 
       if (!connectedWs) {
-        throw new Error(lastWsError?.message || "Failed to connect to ARAVAN Live Server. Please tap to retry.");
+        throw new Error(lastWsError?.message || 'Failed to connect to ARAVAN Live Server.');
       }
 
       this.ws = connectedWs;
 
-      // 4. Start Microphone capture at 16kHz PCM
-      try {
-        await this.audioStreamer.start(
-          (pcm16Base64) => {
-            // Stream raw 16kHz PCM audio chunk to Live API
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-              const msg: LiveClientMessage = {
-                type: 'audio',
-                audio: pcm16Base64,
-              };
-              this.ws.send(JSON.stringify(msg));
-              this.stateManager.incrementPacketsSent();
-            }
-          },
-          (micVolume) => {
-            const currentSpeakerVol = this.stateManager.getState().speakerVolume;
-            this.stateManager.setVolumes(micVolume, currentSpeakerVol);
+      const connectedReadyPromise = this.waitForConnected(8000);
 
-            // Local barge-in: only if user speaks noticeably while audio is playing
-            if (micVolume > 0.4 && this.audioPlayer.currentlyPlaying) {
-              this.audioPlayer.interrupt();
-              this.stateManager.incrementInterruptions();
-              if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({ type: 'interrupt' }));
-              }
-            }
-          }
-        );
-      } catch (micErr: any) {
-        console.warn('[ARAVAN] Microphone initialization note:', micErr?.message || micErr);
-        // Do not crash the entire Live session if mic is denied or unavailable; user can still type & receive voice
-      }
-
-      // 5. Handle incoming WebSocket messages from Live API
       this.ws.onmessage = async (event) => {
         try {
           const message: LiveServerMessage = JSON.parse(event.data);
@@ -174,39 +333,48 @@ export class LiveSession {
           if (message.type === 'connected') {
             this.isConnected = true;
             this.isConnecting = false;
-            this.stateManager.setVoiceState('listening');
+            this.stateManager.setAudioError(null);
+            this.stateManager.setVoiceState(this.audioPlayer.currentlyPlaying ? 'speaking' : 'listening');
+            this.resolveConnectedWaiters();
 
-            // Feed foundational background memory context on initial connection
-            MemoryManager.getInstance().getRelevantContext('who built you creator user preferences ARAVAN')
-              .then((ctx) => {
-                if (ctx && this.ws && this.ws.readyState === WebSocket.OPEN) {
-                  this.ws.send(JSON.stringify({
-                    type: 'init',
-                    context: ctx,
-                  }));
+            // Send initial memory context cleanly to server session
+            MemoryManager.getInstance()
+              .getRelevantContext('user identity preferences profile')
+              .then((context) => {
+                if (context && this.ws && this.ws.readyState === WebSocket.OPEN) {
+                  this.ws.send(JSON.stringify({ type: 'init', context }));
                 }
               })
               .catch(() => {});
+          } else if (message.type === 'reconnecting') {
+            this.stateManager.setVoiceState('connecting');
           } else if (message.type === 'audio' && message.audio) {
-            // Receive 24kHz PCM chunk and play via Web Audio
             this.stateManager.incrementPacketsReceived();
             await this.audioPlayer.playPCMChunk(message.audio);
           } else if (message.type === 'transcription' && message.text) {
             if (message.sender === 'user') {
-              this.stateManager.updateUserSpokenText(message.text, message.finished ?? false);
+              if (looksLikeTimeQuery(message.text)) {
+                this.stateManager.recordTimeDiagnostics({
+                  lastQuery: message.text.trim(),
+                  recognizedIntent: 'semantic_time_query_voice',
+                });
+              }
+              this.stateManager.updateUserSpokenText(
+                message.text,
+                message.finished ?? false,
+                message.isDelta ?? false
+              );
             } else {
               this.stateManager.appendAssistantText(message.text, message.finished ?? false);
             }
           } else if (message.type === 'turn_complete') {
             this.stateManager.finalizeStreamingMessages();
           } else if (message.type === 'interrupted') {
-            // Server detected user speech or text barge-in
             this.audioPlayer.interrupt();
             this.stateManager.incrementInterruptions();
             this.stateManager.finalizeStreamingMessages();
             this.stateManager.setVoiceState('listening');
           } else if (message.type === 'tool_call' && message.toolCall) {
-            // Execute tool and return response back to Gemini Live
             const toolResponse = await this.toolManager.executeTool(message.toolCall);
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
               const resMsg: LiveClientMessage = {
@@ -216,11 +384,15 @@ export class LiveSession {
               this.ws.send(JSON.stringify(resMsg));
             }
           } else if (message.type === 'error') {
+            const serverErrMsg = message.error?.message || 'Live API session encountered an error.';
             console.error('[ARAVAN Server Error]', message.error);
-            if (message.error?.code === 'VOICE_UNAVAILABLE' || message.error?.code === 'VOICE_CONFIG_ERROR') {
-              this.handleError("ARAVAN voice unavailable. Please reconnect.");
+            if (message.error?.code === 'LIVE_INTERNAL_ERROR') {
+              this.stateManager.setAudioError(serverErrMsg);
+              this.stateManager.setVoiceState('listening');
             } else {
-              this.handleError(message.error?.message || "Live API session encountered an error.");
+              this.lastSessionError = serverErrMsg;
+              this.rejectConnectedWaiters(new Error(serverErrMsg));
+              this.handleError(serverErrMsg);
             }
           }
         } catch (parseErr) {
@@ -230,18 +402,32 @@ export class LiveSession {
 
       this.ws.onclose = (evt) => {
         console.warn('[ARAVAN] WebSocket closed:', evt.code, evt.reason);
+        const reasonErr =
+          this.lastSessionError ||
+          evt.reason ||
+          (evt.code !== 1000 ? `Connection closed (code ${evt.code}). Tap to reconnect.` : 'Disconnected');
+        if (this.isConnecting) {
+          this.rejectConnectedWaiters(new Error(reasonErr));
+        }
         if (this.isConnected || this.isConnecting) {
           this.disconnect();
           if (evt.code !== 1000) {
-            this.stateManager.setError("Connection closed. Tap to reconnect.");
+            this.stateManager.setError(reasonErr);
           }
         }
       };
+
+      await connectedReadyPromise;
+
+      if (enableMic) {
+        await this.startMicrophone();
+      }
     } catch (err) {
-      console.error('[ARAVAN] Connection error:', err);
-      this.handleError(
-        (err as Error)?.message || "ARAVAN's voice couldn't be initialized. Please reconnect."
-      );
+      const msg =
+        (err as Error)?.message || "ARAVAN's voice couldn't be initialized. Please reconnect.";
+      console.error('[ARAVAN] Connection error:', msg);
+      this.handleError(msg);
+      throw err;
     }
   }
 
@@ -251,13 +437,21 @@ export class LiveSession {
   }
 
   /**
-   * Send a typed message into the shared Gemini Live session
+   * Send a typed message into the shared Gemini Live session (replies in text + Charon audio).
    */
   async sendTextMessage(text: string): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    // If assistant is speaking when user sends a text message, interrupt immediately
+    await this.unlockAudio();
+
+    if (looksLikeTimeQuery(trimmed)) {
+      this.stateManager.recordTimeDiagnostics({
+        lastQuery: trimmed,
+        recognizedIntent: 'semantic_time_query_text',
+      });
+    }
+
     if (this.audioPlayer.currentlyPlaying) {
       this.audioPlayer.interrupt();
       this.stateManager.incrementInterruptions();
@@ -266,21 +460,23 @@ export class LiveSession {
       }
     }
 
-    // Record the user's typed message in conversation history
     this.stateManager.addUserTextMessage(trimmed);
 
-    // If not connected yet, automatically initiate live connection
     if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      await this.connect();
+      try {
+        await this.connect({ enableMic: false });
+      } catch (connErr: any) {
+        const msg = connErr?.message || 'Gemini Live connection unavailable.';
+        console.warn('[ARAVAN] Live connection unavailable for message:', msg);
+        this.stateManager.addMessage({
+          role: 'assistant',
+          text: `Voice session error: ${msg}`,
+          source: 'text',
+        });
+        return;
+      }
     }
 
-    // Wait for the Live session to be fully open and connected
-    const startWait = Date.now();
-    while ((!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) && Date.now() - startWait < 6000) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-
-    // Retrieve relevant memories for the text message
     let context: string | undefined;
     try {
       context = await MemoryManager.getInstance().getRelevantContext(trimmed);
@@ -288,7 +484,7 @@ export class LiveSession {
       // ignore
     }
 
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
       const msg: LiveClientMessage = {
         type: 'text',
         text: trimmed,
@@ -297,14 +493,16 @@ export class LiveSession {
       this.ws.send(JSON.stringify(msg));
       this.stateManager.incrementPacketsSent();
     } else {
-      console.error('[ARAVAN] Could not send text message: WebSocket is not open.');
-      this.stateManager.setError("Failed to reach ARAVAN. Please tap reconnect.");
+      const errMsg = this.lastSessionError || 'Gemini Live session is not connected.';
+      this.stateManager.setError(errMsg);
+      this.stateManager.addMessage({
+        role: 'assistant',
+        text: `Voice session error: ${errMsg}`,
+        source: 'text',
+      });
     }
   }
 
-  /**
-   * Interrupt current speech manually
-   */
   interrupt(): void {
     this.audioPlayer.interrupt();
     this.stateManager.incrementInterruptions();
@@ -313,20 +511,21 @@ export class LiveSession {
     }
   }
 
-  /**
-   * Gracefully disconnect the Live session
-   */
   disconnect(): void {
     this.isConnected = false;
     this.isConnecting = false;
+    this.connectPromise = null;
+    this.connectedWaiters = [];
+    this.connectionRejectWaiters = [];
 
     this.audioStreamer.stop();
     this.audioPlayer.stop();
+    this.speechListener.stop();
 
     if (this.ws) {
       try {
         if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
-          this.ws.close(1000, "User disconnected");
+          this.ws.close(1000, 'User disconnected');
         }
       } catch {
         // ignore
@@ -339,6 +538,10 @@ export class LiveSession {
 
   get connected(): boolean {
     return this.isConnected;
+  }
+
+  setOnThemeChange(cb: (themeId: string) => void): void {
+    this.toolManager.setOnThemeChange(cb);
   }
 
   get connecting(): boolean {
@@ -355,6 +558,39 @@ export class LiveSession {
 
   get isMicActive(): boolean {
     return this.audioStreamer.active;
+  }
+
+  get isMicMuted(): boolean {
+    return this.audioStreamer.muted;
+  }
+
+  getAudioAnalyserNode(): AnalyserNode | null {
+    return this.audioPlayer.getAnalyserNode();
+  }
+
+  toggleMicMute(): boolean {
+    if (this.isConnected && !this.audioStreamer.isStreamingActive) {
+      this.startMicrophone();
+      return false;
+    }
+    const isMuted = this.audioStreamer.toggleMute();
+    this.stateManager.setMicMuted(isMuted);
+    if (isMuted) {
+      this.speechListener.pause();
+    } else {
+      this.speechListener.resume();
+    }
+    return isMuted;
+  }
+
+  setMicMuted(muted: boolean): void {
+    this.audioStreamer.setMuted(muted);
+    this.stateManager.setMicMuted(muted);
+    if (muted) {
+      this.speechListener.pause();
+    } else {
+      this.speechListener.resume();
+    }
   }
 
   get audioQueueSize(): number {

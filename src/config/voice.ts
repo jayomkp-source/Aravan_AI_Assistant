@@ -14,19 +14,40 @@ export const ARAVAN_VOICE_CONFIG = {
   voiceName: ARAVAN_VOICE,
 } as const;
 
+export const ARAVAN_SPEECH_CONFIG = {
+  voiceConfig: {
+    prebuiltVoiceConfig: {
+      voiceName: "Charon" as const,
+    },
+  },
+} as const;
+
+export function getLiveSpeechConfig() {
+  return {
+    voiceConfig: {
+      prebuiltVoiceConfig: {
+        voiceName: "Charon" as const,
+      },
+    },
+  };
+}
+
 export const VOICE_PIPELINE = "Gemini Live" as const;
 export const VOICE_FALLBACK_STATUS = "DISABLED" as const;
 export const AUDIO_INPUT_FORMAT = "PCM16 / 16kHz" as const;
 export const AUDIO_OUTPUT_FORMAT = "PCM / 24kHz" as const;
-export const LIVE_MODEL_NAME = "gemini-3.1-flash-live-preview" as const;
+export const LIVE_MODEL_NAME = "gemini-3.8-live" as const;
 
 /**
  * Validates that the ARAVAN voice configuration is strictly present and valid.
  * Throws an error immediately if configuration is missing, preventing any fallback.
  */
 export function validateVoiceConfig(): void {
-  if (!ARAVAN_VOICE || typeof ARAVAN_VOICE !== "string") {
-    throw new Error("ARAVAN voice configuration missing.");
+  if (!ARAVAN_VOICE || ARAVAN_VOICE !== "Charon") {
+    throw new Error("ARAVAN voice configuration missing or invalid (must be 'Charon').");
+  }
+  if (ARAVAN_SPEECH_CONFIG.voiceConfig.prebuiltVoiceConfig.voiceName !== "Charon") {
+    throw new Error("ARAVAN speechConfig voiceName must be explicitly set to 'Charon'.");
   }
 }
 

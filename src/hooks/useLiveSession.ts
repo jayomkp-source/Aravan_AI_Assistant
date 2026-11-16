@@ -5,18 +5,28 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { StateManager, ARAVANState } from '../state/StateManager';
 import { LiveSession } from '../live/LiveSession';
-import { InteractionMode } from '../types';
+import { GlowLevel, InteractionMode } from '../types';
 
-export function useLiveSession() {
+export interface UseLiveSessionOptions {
+  onThemeChange?: (themeId: string) => void;
+}
+
+export function useLiveSession(options?: UseLiveSessionOptions) {
   const stateManagerRef = useRef<StateManager | null>(null);
   const liveSessionRef = useRef<LiveSession | null>(null);
 
   if (!stateManagerRef.current) {
-    stateManagerRef.current = new StateManager();
+    stateManagerRef.current = StateManager.getInstance();
   }
   if (!liveSessionRef.current) {
     liveSessionRef.current = new LiveSession(stateManagerRef.current);
   }
+
+  useEffect(() => {
+    if (options?.onThemeChange && liveSessionRef.current) {
+      liveSessionRef.current.setOnThemeChange(options.onThemeChange);
+    }
+  }, [options?.onThemeChange]);
 
   const [state, setState] = useState<ARAVANState>(stateManagerRef.current.getState());
 
@@ -33,10 +43,16 @@ export function useLiveSession() {
     };
   }, []);
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (connectOpts?: { enableMic?: boolean }) => {
     if (liveSessionRef.current) {
       stateManagerRef.current?.clearError();
-      await liveSessionRef.current.connect();
+      await liveSessionRef.current.connect({ enableMic: connectOpts?.enableMic ?? true });
+    }
+  }, []);
+
+  const unlockAudio = useCallback(async () => {
+    if (liveSessionRef.current) {
+      await liveSessionRef.current.unlockAudio();
     }
   }, []);
 
@@ -48,7 +64,13 @@ export function useLiveSession() {
 
   const toggleConnection = useCallback(async () => {
     if (state.voiceState === 'disconnected' || state.voiceState === 'error') {
-      await connect();
+      await connect({ enableMic: true });
+    } else if (
+      liveSessionRef.current?.connected &&
+      !liveSessionRef.current?.isMicActive &&
+      !liveSessionRef.current?.isMicMuted
+    ) {
+      await liveSessionRef.current.startMicrophone();
     } else {
       disconnect();
     }
@@ -74,6 +96,21 @@ export function useLiveSession() {
     stateManagerRef.current?.clearMessages();
   }, []);
 
+  const setGlowLevel = useCallback((level: GlowLevel) => {
+    stateManagerRef.current?.setGlowLevel(level);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('aravan:glow_level', { detail: { level } }));
+    }
+  }, []);
+
+  const setStopListeningWhileSpeaking = useCallback((val: boolean) => {
+    stateManagerRef.current?.setStopListeningWhileSpeaking(val);
+  }, []);
+
+  const toggleStopListeningWhileSpeaking = useCallback(() => {
+    return stateManagerRef.current?.toggleStopListeningWhileSpeaking() ?? true;
+  }, []);
+
   return {
     state,
     voiceState: state.voiceState,
@@ -81,21 +118,35 @@ export function useLiveSession() {
     micVolume: state.micVolume,
     speakerVolume: state.speakerVolume,
     errorMessage: state.errorMessage,
+    lastAudioError: state.lastAudioError,
     activeTool: state.activeTool,
     lastTranscription: state.lastTranscription,
     lastLiveEvent: state.lastLiveEvent,
     activeAssistantMessageId: state.activeAssistantMessageId,
     messages: state.messages,
     stats: state.stats,
+    glowLevel: state.glowLevel,
+    stopListeningWhileSpeaking: state.stopListeningWhileSpeaking,
+    followUpSuggestions: state.followUpSuggestions,
+    timeDiagnostics: state.timeDiagnostics,
+    glowDiagnostics: state.glowDiagnostics,
     audioContextState: liveSessionRef.current?.audioContextState ?? 'uninitialized',
     isMicActive: liveSessionRef.current?.isMicActive ?? false,
+    isMicMuted: state.isMicMuted || (liveSessionRef.current?.isMicMuted ?? false),
     audioQueueSize: liveSessionRef.current?.audioQueueSize ?? 0,
+    isPlaying: liveSessionRef.current?.isPlaying ?? false,
+    getAudioAnalyserNode: () => liveSessionRef.current?.getAudioAnalyserNode() ?? null,
     connect,
+    unlockAudio,
     disconnect,
     toggleConnection,
+    toggleMicMute: () => liveSessionRef.current?.toggleMicMute() ?? false,
     interrupt,
     sendTextMessage,
     setInteractionMode,
     clearMessages,
+    setGlowLevel,
+    setStopListeningWhileSpeaking,
+    toggleStopListeningWhileSpeaking,
   };
 }

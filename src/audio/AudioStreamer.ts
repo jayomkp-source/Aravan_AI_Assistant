@@ -14,6 +14,7 @@ export class AudioStreamer {
   private onAudioChunkCallback: ((base64Pcm: string) => void) | null = null;
   private onVolumeChangeCallback: ((volume: number) => void) | null = null;
   private isStreaming = false;
+  private isMuted = false;
   private animationFrameId: number | null = null;
 
   constructor() {}
@@ -65,7 +66,7 @@ export class AudioStreamer {
       this.processorNode = this.audioContext.createScriptProcessor(2048, 1, 1);
 
       this.processorNode.onaudioprocess = (e: AudioProcessingEvent) => {
-        if (!this.isStreaming) return;
+        if (!this.isStreaming || this.isMuted) return;
 
         const inputChannelData = e.inputBuffer.getChannelData(0);
         const actualSampleRate = e.inputBuffer.sampleRate;
@@ -170,12 +171,12 @@ export class AudioStreamer {
       view.setInt16(i * 2, pcm16, true); // true for little-endian
     }
 
-    // Convert ArrayBuffer to binary string and base64 encode
+    // Convert ArrayBuffer to binary string and base64 encode using fast chunks
     const bytes = new Uint8Array(buffer);
     let binary = '';
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    const chunkSize = 2048;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
     }
     return btoa(binary);
   }
@@ -222,7 +223,7 @@ export class AudioStreamer {
   }
 
   get active(): boolean {
-    return this.isStreaming;
+    return this.isStreaming && !this.isMuted;
   }
 
   get isStreamingActive(): boolean {
@@ -231,5 +232,18 @@ export class AudioStreamer {
 
   get streaming(): boolean {
     return this.isStreaming;
+  }
+
+  get muted(): boolean {
+    return this.isMuted;
+  }
+
+  setMuted(muted: boolean): void {
+    this.isMuted = muted;
+  }
+
+  toggleMute(): boolean {
+    this.isMuted = !this.isMuted;
+    return this.isMuted;
   }
 }
